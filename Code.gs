@@ -15,7 +15,33 @@ const SHEET_NAME = '記帳明細';
 const TZ = 'Asia/Taipei';
 const CACHE_TTL = 300; // 5 分鐘
 
-const ENTRY_HEADER = ['日期', '金額', '類別', '說明', '來源', '備註', 'ID', '建立時間', '用戶'];
+const ENTRY_HEADER = ['日期', '金額', '類別', '說明', '來源', '備註', 'ID', '建立時間', '用戶', '帳戶'];
+
+const ACCOUNT_SHEET = '帳戶設定';
+const ACCOUNT_HEADER = ['名稱', '圖示', '排序', '狀態'];
+const DEFAULT_ACCOUNTS = [
+  ['現金', '💵', 1, 'active'],
+  ['信用卡', '💳', 2, 'active'],
+  ['街口', '🟢', 3, 'active'],
+  ['悠遊卡', '🟦', 4, 'active'],
+  ['匯款', '🏦', 5, 'active'],
+];
+
+const CATEGORY_SHEET = '類別設定';
+const CATEGORY_HEADER = ['名稱', '圖示', '排序', '狀態', '類型'];
+// 類型: expense / income / both — 影響在記帳頁顯示位置
+const DEFAULT_CATEGORIES = [
+  ['🍜 餐飲', '🍜', 1, 'active', 'expense'],
+  ['🚌 交通', '🚌', 2, 'active', 'expense'],
+  ['🛍️ 購物', '🛍️', 3, 'active', 'expense'],
+  ['🎬 娛樂', '🎬', 4, 'active', 'expense'],
+  ['💊 醫療', '💊', 5, 'active', 'expense'],
+  ['🏠 住家', '🏠', 6, 'active', 'expense'],
+  ['📱 通訊', '📱', 7, 'active', 'expense'],
+  ['💰 收入', '💰', 8, 'active', 'income'],
+  ['📊 投資', '📊', 9, 'active', 'both'],
+  ['📦 其他', '📦', 10, 'active', 'both'],
+];
 
 const CATEGORY_MAP = {
   '🍜 餐飲': ['早餐','午餐','晚餐','飲料','咖啡','奶茶','珍奶','吃','食','餐','麵','飯','便當','外送','火鍋','燒烤','壽司','拉麵','麥當勞','肯德基','星巴克','starbucks','foodpanda','ubereats'],
@@ -117,6 +143,7 @@ function _rowToEntry_(row, idx, fallbackId) {
     source:      String(row[idx['來源']] || 'manual'),
     note:        String(row[idx['備註']] || ''),
     user:        String(row[idx['用戶']] != null ? row[idx['用戶']] : ''),
+    account:     String(row[idx['帳戶']] != null ? row[idx['帳戶']] : ''),
   };
 }
 
@@ -156,7 +183,7 @@ function route_(e, payload) {
   }
 }
 
-const _WRITE_ACTIONS_ = { addEntry: 1, addEntries: 1, updateEntry: 1, deleteEntry: 1, processOCR: 0 };
+const _WRITE_ACTIONS_ = { addEntry: 1, addEntries: 1, updateEntry: 1, deleteEntry: 1, processOCR: 0, saveAccount: 1, deleteAccount: 1, saveCategory: 1, deleteCategory: 1 };
 
 function _maybeInvalidate_(action) {
   if (_WRITE_ACTIONS_[action]) _bumpCache_();
@@ -173,6 +200,12 @@ function _dispatch_(action, payload) {
     case 'updateEntry':   return handleUpdateEntry_(payload);
     case 'deleteEntry':   return handleDeleteEntry_(payload);
     case 'processOCR':    return handleProcessOCR_(payload);
+    case 'getAccounts':   return handleGetAccounts_(payload);
+    case 'saveAccount':   return handleSaveAccount_(payload);
+    case 'deleteAccount': return handleDeleteAccount_(payload);
+    case 'getCategories': return handleGetCategories_(payload);
+    case 'saveCategory':  return handleSaveCategory_(payload);
+    case 'deleteCategory':return handleDeleteCategory_(payload);
     default: throw new Error('未知 action: ' + action);
   }
 }
@@ -305,9 +338,11 @@ function handleAddEntry_(p) {
   row[idx['ID']]       = id;
   row[idx['建立時間']] = now;
   if (idx['用戶'] != null) row[idx['用戶']] = user;
+  const account = String(p.account || entry.account || '').trim();
+  if (idx['帳戶'] != null) row[idx['帳戶']] = account;
   sheet.appendRow(row);
 
-  return { id: id, category: category, amount: amount, user: user };
+  return { id: id, category: category, amount: amount, user: user, account: account };
 }
 
 function handleUpdateEntry_(p) {
@@ -334,7 +369,7 @@ function handleUpdateEntry_(p) {
   // 依 patch 寫入指定欄位 (依 header idx, 不 hard-code 順序)
   const fieldMap = {
     date: '日期', amount: '金額', category: '類別', description: '說明',
-    source: '來源', note: '備註', user: '用戶',
+    source: '來源', note: '備註', user: '用戶', account: '帳戶',
   };
   Object.keys(fieldMap).forEach(function (k) {
     if (patch[k] !== undefined && idx[fieldMap[k]] != null) {
@@ -656,10 +691,167 @@ function classifyText_(text) {
   return '📦 其他';
 }
 
+// ============ 帳戶/類別設定 sheet ============
+
+function _ensureSettingSheet_(name, header, defaultRows) {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    sheet.appendRow(header);
+    sheet.getRange(1, 1, 1, header.length)
+      .setFontWeight('bold').setBackground('#0d1525').setFontColor('#4fd9b3');
+    sheet.setFrozenRows(1);
+    if (defaultRows && defaultRows.length) {
+      sheet.getRange(2, 1, defaultRows.length, header.length).setValues(defaultRows);
+    }
+  }
+  return sheet;
+}
+
+function _readSettingRows_(sheetName, header, defaults) {
+  const sheet = _ensureSettingSheet_(sheetName, header, defaults);
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+  const idx = _headerIdx_(data[0]);
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (!r[idx['名稱']]) continue;
+    const o = {};
+    Object.keys(idx).forEach(function (k) { o[k] = r[idx[k]]; });
+    rows.push(o);
+  }
+  rows.sort(function (a, b) {
+    const sa = Number(a['排序']) || 0, sb = Number(b['排序']) || 0;
+    return sa - sb;
+  });
+  return rows;
+}
+
+function handleGetAccounts_(p) {
+  const rows = _readSettingRows_(ACCOUNT_SHEET, ACCOUNT_HEADER, DEFAULT_ACCOUNTS);
+  const includeInactive = !!p.includeInactive;
+  const list = rows.filter(function (r) { return includeInactive || r['狀態'] !== 'inactive'; })
+    .map(function (r) {
+      return { name: String(r['名稱']), icon: String(r['圖示'] || ''), sort: Number(r['排序']) || 0, status: String(r['狀態'] || 'active') };
+    });
+  return { accounts: list };
+}
+
+function handleSaveAccount_(p) {
+  const name = String(p.name || '').trim();
+  if (!name) throw new Error('缺少 name');
+  const sheet = _ensureSettingSheet_(ACCOUNT_SHEET, ACCOUNT_HEADER, DEFAULT_ACCOUNTS);
+  const data = sheet.getDataRange().getValues();
+  const idx = _headerIdx_(data[0]);
+  const oldName = String(p.oldName || '').trim();
+  // 編輯現有
+  if (oldName) {
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][idx['名稱']]).trim() === oldName) {
+        sheet.getRange(i + 1, idx['名稱']  + 1).setValue(name);
+        if (p.icon !== undefined) sheet.getRange(i + 1, idx['圖示'] + 1).setValue(p.icon);
+        if (p.sort !== undefined) sheet.getRange(i + 1, idx['排序'] + 1).setValue(Number(p.sort) || 0);
+        if (p.status !== undefined) sheet.getRange(i + 1, idx['狀態'] + 1).setValue(p.status);
+        return { name: name, updated: true };
+      }
+    }
+    throw new Error('找不到帳戶: ' + oldName);
+  }
+  // 新增
+  // 檢查重名
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idx['名稱']]).trim() === name) throw new Error('帳戶名稱已存在: ' + name);
+  }
+  const row = new Array(data[0].length).fill('');
+  row[idx['名稱']] = name;
+  row[idx['圖示']] = p.icon || '';
+  row[idx['排序']] = Number(p.sort) || (data.length);
+  row[idx['狀態']] = p.status || 'active';
+  sheet.appendRow(row);
+  return { name: name, created: true };
+}
+
+function handleDeleteAccount_(p) {
+  const name = String(p.name || '').trim();
+  if (!name) throw new Error('缺少 name');
+  const sheet = _ensureSettingSheet_(ACCOUNT_SHEET, ACCOUNT_HEADER, DEFAULT_ACCOUNTS);
+  const data = sheet.getDataRange().getValues();
+  const idx = _headerIdx_(data[0]);
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idx['名稱']]).trim() === name) {
+      sheet.deleteRow(i + 1);
+      return { name: name, deleted: true };
+    }
+  }
+  throw new Error('找不到帳戶: ' + name);
+}
+
+function handleGetCategories_(p) {
+  const rows = _readSettingRows_(CATEGORY_SHEET, CATEGORY_HEADER, DEFAULT_CATEGORIES);
+  const includeInactive = !!p.includeInactive;
+  const list = rows.filter(function (r) { return includeInactive || r['狀態'] !== 'inactive'; })
+    .map(function (r) {
+      return { name: String(r['名稱']), icon: String(r['圖示'] || ''), sort: Number(r['排序']) || 0, status: String(r['狀態'] || 'active'), type: String(r['類型'] || 'expense') };
+    });
+  return { categories: list };
+}
+
+function handleSaveCategory_(p) {
+  const name = String(p.name || '').trim();
+  if (!name) throw new Error('缺少 name');
+  const sheet = _ensureSettingSheet_(CATEGORY_SHEET, CATEGORY_HEADER, DEFAULT_CATEGORIES);
+  const data = sheet.getDataRange().getValues();
+  const idx = _headerIdx_(data[0]);
+  const oldName = String(p.oldName || '').trim();
+  if (oldName) {
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][idx['名稱']]).trim() === oldName) {
+        sheet.getRange(i + 1, idx['名稱']  + 1).setValue(name);
+        if (p.icon !== undefined) sheet.getRange(i + 1, idx['圖示'] + 1).setValue(p.icon);
+        if (p.sort !== undefined) sheet.getRange(i + 1, idx['排序'] + 1).setValue(Number(p.sort) || 0);
+        if (p.status !== undefined) sheet.getRange(i + 1, idx['狀態'] + 1).setValue(p.status);
+        if (p.type !== undefined && idx['類型'] != null) sheet.getRange(i + 1, idx['類型'] + 1).setValue(p.type);
+        return { name: name, updated: true };
+      }
+    }
+    throw new Error('找不到類別: ' + oldName);
+  }
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idx['名稱']]).trim() === name) throw new Error('類別名稱已存在: ' + name);
+  }
+  const row = new Array(data[0].length).fill('');
+  row[idx['名稱']] = name;
+  row[idx['圖示']] = p.icon || '';
+  row[idx['排序']] = Number(p.sort) || (data.length);
+  row[idx['狀態']] = p.status || 'active';
+  if (idx['類型'] != null) row[idx['類型']] = p.type || 'expense';
+  sheet.appendRow(row);
+  return { name: name, created: true };
+}
+
+function handleDeleteCategory_(p) {
+  const name = String(p.name || '').trim();
+  if (!name) throw new Error('缺少 name');
+  const sheet = _ensureSettingSheet_(CATEGORY_SHEET, CATEGORY_HEADER, DEFAULT_CATEGORIES);
+  const data = sheet.getDataRange().getValues();
+  const idx = _headerIdx_(data[0]);
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idx['名稱']]).trim() === name) {
+      sheet.deleteRow(i + 1);
+      return { name: name, deleted: true };
+    }
+  }
+  throw new Error('找不到類別: ' + name);
+}
+
 // ============ 初始化 ============
 
 function setup() {
   _getSheet_();
+  _ensureSettingSheet_(ACCOUNT_SHEET, ACCOUNT_HEADER, DEFAULT_ACCOUNTS);
+  _ensureSettingSheet_(CATEGORY_SHEET, CATEGORY_HEADER, DEFAULT_CATEGORIES);
   SpreadsheetApp.flush();
   Logger.log('✅ 初始化完成');
 }
