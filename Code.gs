@@ -156,7 +156,7 @@ function route_(e, payload) {
   }
 }
 
-const _WRITE_ACTIONS_ = { addEntry: 1, addEntries: 1, processOCR: 0 };
+const _WRITE_ACTIONS_ = { addEntry: 1, addEntries: 1, updateEntry: 1, deleteEntry: 1, processOCR: 0 };
 
 function _maybeInvalidate_(action) {
   if (_WRITE_ACTIONS_[action]) _bumpCache_();
@@ -170,6 +170,8 @@ function _dispatch_(action, payload) {
     case 'getMonthStats': return handleGetMonthStats_(payload);
     case 'addEntry':      return handleAddEntry_(payload);
     case 'addEntries':    return handleAddEntries_(payload);
+    case 'updateEntry':   return handleUpdateEntry_(payload);
+    case 'deleteEntry':   return handleDeleteEntry_(payload);
     case 'processOCR':    return handleProcessOCR_(payload);
     default: throw new Error('未知 action: ' + action);
   }
@@ -306,6 +308,66 @@ function handleAddEntry_(p) {
   sheet.appendRow(row);
 
   return { id: id, category: category, amount: amount, user: user };
+}
+
+function handleUpdateEntry_(p) {
+  const id = String(p.id || (p.entry && p.entry.id) || '').trim();
+  if (!id) throw new Error('缺少 id');
+  const patch = p.entry || p.patch || {};
+
+  const sheet = _getSheet_();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) throw new Error('沒有資料');
+
+  const header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const idx = _headerIdx_(header);
+  if (idx['ID'] == null) throw new Error('Sheet 缺少 ID 欄');
+
+  const idCol = idx['ID'] + 1;
+  const idValues = sheet.getRange(2, idCol, lastRow - 1, 1).getValues();
+  let rowNum = -1;
+  for (let i = 0; i < idValues.length; i++) {
+    if (String(idValues[i][0]).trim() === id) { rowNum = i + 2; break; }
+  }
+  if (rowNum < 0) throw new Error('找不到 ID: ' + id);
+
+  // 依 patch 寫入指定欄位 (依 header idx, 不 hard-code 順序)
+  const fieldMap = {
+    date: '日期', amount: '金額', category: '類別', description: '說明',
+    source: '來源', note: '備註', user: '用戶',
+  };
+  Object.keys(fieldMap).forEach(function (k) {
+    if (patch[k] !== undefined && idx[fieldMap[k]] != null) {
+      let v = patch[k];
+      if (k === 'amount') v = _toNumber_(v);
+      sheet.getRange(rowNum, idx[fieldMap[k]] + 1).setValue(v);
+    }
+  });
+
+  return { id: id, updated: true };
+}
+
+function handleDeleteEntry_(p) {
+  const id = String(p.id || '').trim();
+  if (!id) throw new Error('缺少 id');
+
+  const sheet = _getSheet_();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) throw new Error('沒有資料');
+
+  const header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const idx = _headerIdx_(header);
+  if (idx['ID'] == null) throw new Error('Sheet 缺少 ID 欄');
+
+  const idCol = idx['ID'] + 1;
+  const idValues = sheet.getRange(2, idCol, lastRow - 1, 1).getValues();
+  for (let i = 0; i < idValues.length; i++) {
+    if (String(idValues[i][0]).trim() === id) {
+      sheet.deleteRow(i + 2);
+      return { id: id, deleted: true };
+    }
+  }
+  throw new Error('找不到 ID: ' + id);
 }
 
 function handleAddEntries_(p) {

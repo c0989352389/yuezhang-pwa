@@ -142,6 +142,23 @@ code{background:var(--card);border:1px solid var(--border);border-radius:4px;pad
     <button class="btn btns" style="margin-top:8px" onclick="document.getElementById('setupModal').style.display='none'">稍後設定</button>
   </div>
 </div>
+<div class="mov" id="editModal" style="display:none">
+  <div class="modal">
+    <div class="mtit">✏️ 編輯記帳</div>
+    <div class="fg"><div class="fl">收支類型</div><div class="ttype"><button class="tbtn" id="ebE" type="button" onclick="setEditType('exp')">－ 支出</button><button class="tbtn" id="ebI" type="button" onclick="setEditType('inc')">＋ 收入</button></div></div>
+    <div class="fg"><div class="fl">金額（元）</div><input type="number" id="eAmt" inputmode="decimal" min="0" step="1"></div>
+    <div class="frow">
+      <div class="fg"><div class="fl">類別</div><select id="eCat"><option>🍜 餐飲</option><option>🚌 交通</option><option>🛍️ 購物</option><option>🎬 娛樂</option><option>💊 醫療</option><option>🏠 住家</option><option>📱 通訊</option><option>💰 收入</option><option>📊 投資</option><option>📦 其他</option></select></div>
+      <div class="fg"><div class="fl">日期</div><input type="date" id="eDate"></div>
+    </div>
+    <div class="fg"><div class="fl">說明</div><input type="text" id="eDesc"></div>
+    <div class="fg"><div class="fl">備註</div><input type="text" id="eNote"></div>
+    <div class="fg"><div class="fl">使用者</div><div class="ttype"><button class="tbtn" id="eUH" type="button" onclick="setEditUser('翰君')">翰君</button><button class="tbtn" id="eUJ" type="button" onclick="setEditUser('錦屏')">錦屏</button></div></div>
+    <button class="btn btnp" onclick="saveEdit()">💾 儲存變更</button>
+    <button class="btn btns" style="margin-top:8px;background:#3a1a1a;color:#ff6b6b;border-color:#5a2828" onclick="askDelete()">🗑️ 刪除這筆</button>
+    <button class="btn btns" style="margin-top:8px" onclick="closeEdit()">取消</button>
+  </div>
+</div>
 <div id="app">
   <header>
     <div class="hl"><div class="logo">🌙</div><span class="appname">月帳</span><span id="userBadge" style="font-size:11px;color:#4fd9b3;margin-left:6px;padding:2px 8px;border-radius:10px;background:rgba(79,217,179,.14)">未設定</span></div>
@@ -201,6 +218,16 @@ code{background:var(--card);border:1px solid var(--border);border-radius:4px;pad
         <button class="btn btnp" style="margin-top:11px" onclick="importOCR()">匯入選取的記帳</button>
       </div>
     </section>
+    <section id="page-history" class="page">
+      <div class="statsh">
+        <div style="font-size:16px;font-weight:600">歷史明細</div>
+        <div class="mnav"><span id="hisM"></span><div class="marr" onclick="chHisM(-1)">‹</div><div class="marr" onclick="chHisM(1)">›</div></div>
+      </div>
+      <div class="ttype" style="margin-bottom:8px"><button class="tbtn" id="hf-all" type="button" onclick="setHisUser('')">全部</button><button class="tbtn" id="hf-han" type="button" onclick="setHisUser('翰君')">翰君</button><button class="tbtn" id="hf-jin" type="button" onclick="setHisUser('錦屏')">錦屏</button></div>
+      <div class="fg" style="margin-bottom:8px"><input type="search" id="hisSearch" placeholder="🔍 搜尋金額 / 說明 / 類別" oninput="renderHistory()" style="width:100%"></div>
+      <div id="hisStat" style="font-size:12px;color:var(--text3);margin-bottom:8px"></div>
+      <div id="hisList"></div>
+    </section>
     <section id="page-stats" class="page">
       <div class="statsh">
         <div style="font-size:16px;font-weight:600">收支統計</div>
@@ -221,15 +248,16 @@ code{background:var(--card);border:1px solid var(--border);border-radius:4px;pad
     <button class="nb active" id="nb-home"   onclick="navigate('home')">  <span class="ni">🏠</span>首頁</button>
     <button class="nb"        id="nb-record" onclick="navigate('record')"><span class="ni">✏️</span>記帳</button>
     <button class="nb"        id="nb-ocr"    onclick="navigate('ocr')">   <span class="ni">📷</span>上傳</button>
+    <button class="nb"        id="nb-history" onclick="navigate('history')"><span class="ni">📜</span>明細</button>
     <button class="nb"        id="nb-stats"  onclick="navigate('stats')"> <span class="ni">📊</span>統計</button>
   </nav>
 </div>
 <script>
 let GAS_URL=localStorage.getItem('gasUrl')||'';
 const CAT_KW={'🍜 餐飲':['早餐','午餐','晚餐','飲料','咖啡','奶茶','吃','食','餐','麵','飯','便當','外送','火鍋','壽司','拉麵','麥當勞','肯德基','星巴克','foodpanda','ubereats'],'🚌 交通':['捷運','mrt','公車','計程車','taxi','uber','停車','加油','youbike','ubike','火車','高鐵'],'🛍️ 購物':['買','超商','7-11','全家','全聯','超市','好市多','大潤發','衣服','鞋','網購','momo','pchome','蝦皮'],'🎬 娛樂':['電影','遊戲','ktv','旅遊','旅行','門票','展覽','訂閱','netflix','spotify','健身'],'💊 醫療':['藥','診所','醫院','掛號','健保','醫療','牙醫'],'🏠 住家':['水費','電費','瓦斯','房租','管理費','修繕','家具','家電'],'📱 通訊':['電話費','網路費','手機費','wifi','電信'],'💰 收入':['薪資','薪水','工資','獎金','收入','轉帳收','匯款','退款'],'📊 投資':['股票','基金','投資','保險費','etf']};
-const S={page:'home',entryType:'exp',sYear:new Date().getFullYear(),sMonth:new Date().getMonth()+1,voiceParsed:null,lastTxt:'',recognition:null,isRec:false,ocrTxs:[],charts:{d:null,b:null},user:localStorage.getItem('user')||'',statsUser:''};
+const S={page:'home',entryType:'exp',sYear:new Date().getFullYear(),sMonth:new Date().getMonth()+1,voiceParsed:null,lastTxt:'',recognition:null,isRec:false,ocrTxs:[],charts:{d:null,b:null},user:localStorage.getItem('user')||'',statsUser:'',hisYear:new Date().getFullYear(),hisMonth:new Date().getMonth()+1,hisUser:'',hisEntries:[],entryCache:{},editId:null,editType:'exp',editUser:'',undoData:null,undoTimer:null};
 document.addEventListener('DOMContentLoaded',()=>{document.getElementById('dateIn').value=today();updatePeriod();updateUserBadge();updateStatsUserBtns();if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});if(!GAS_URL||!S.user)showSetup();else loadHome();});
-function navigate(p){if(S.page===p)return;document.getElementById('page-'+S.page).classList.remove('active');document.getElementById('nb-'+S.page).classList.remove('active');S.page=p;document.getElementById('page-'+p).classList.add('active');document.getElementById('nb-'+p).classList.add('active');if(p==='home')loadHome();if(p==='stats')loadStats();}
+function navigate(p){if(S.page===p)return;document.getElementById('page-'+S.page).classList.remove('active');document.getElementById('nb-'+S.page).classList.remove('active');S.page=p;document.getElementById('page-'+p).classList.add('active');document.getElementById('nb-'+p).classList.add('active');if(p==='home')loadHome();if(p==='stats')loadStats();if(p==='history')loadHistory();}
 function showSetup(){document.getElementById('setupModal').style.display='flex';document.getElementById('gasUrlInput').value=GAS_URL;updateUserPickBtns();}
 function pickUser(name){S.user=name;updateUserPickBtns();}
 function updateUserPickBtns(){document.getElementById('ub-han').className='tbtn'+(S.user==='翰君'?' ai':'');document.getElementById('ub-jin').className='tbtn'+(S.user==='錦屏'?' ai':'');}
@@ -243,7 +271,7 @@ function cacheSet(k,v){try{localStorage.setItem('cache_'+k,JSON.stringify({v,ts:
 async function loadHome(){const ck='home_'+S.sYear+'_'+S.sMonth;const cached=cacheGet(ck);if(cached){renderSummary(cached.stats);renderToday(cached.entries);}else{loading(true);}try{const r=await apiGet({action:'getHomeData',year:S.sYear,month:S.sMonth});renderSummary(r.stats);renderToday(r.entries);cacheSet(ck,{stats:r.stats,entries:r.entries});}catch(e){if(e.message!=='未設定')toast('載入失敗：'+e.message,'err');}loading(false);}
 function renderSummary(st){const b=st.income-st.expense,el=document.getElementById('smBalance');el.textContent=fmtAmt(b,true);el.className='sb '+(b>=0?'pos':'neg');document.getElementById('smInc').textContent='$'+fmtN(st.income);document.getElementById('smExp').textContent='$'+fmtN(st.expense);}
 function renderToday(entries){const el=document.getElementById('todayList');if(!entries||!entries.length){el.innerHTML='<div class="empty"><div class="ei2">📝</div><p>今天還沒有記帳<br>點右上角「+ 記一筆」開始</p></div>';return;}el.innerHTML=entries.map(eHTML).join('');}
-function eHTML(e){const ii=e.amount>=0,src=e.source!=='manual'?`<span class="esrc">${e.source==='voice'?'🎤':'📷'}</span>`:'';const u=e.user?`<span class="esrc" style="background:rgba(79,217,179,.14);color:#4fd9b3">${esc(e.user)}</span>`:'';return`<div class="ei"><div class="eico">${catIco(e.category)}</div><div class="einf"><div class="edsc">${esc(e.description||e.category)}</div><div class="emta"><span>${esc(e.category)}</span>${u}${src}</div></div><div class="eamt ${ii?'inc':'exp'}">${fmtAmt(e.amount,true)}</div></div>`;}
+function eHTML(e){const ii=e.amount>=0,src=e.source!=='manual'?`<span class="esrc">${e.source==='voice'?'🎤':'📷'}</span>`:'';const u=e.user?`<span class="esrc" style="background:rgba(79,217,179,.14);color:#4fd9b3">${esc(e.user)}</span>`:'';S.entryCache[e.id]=e;return`<div class="ei" style="cursor:pointer" onclick="openEdit('${esc(e.id)}')"><div class="eico">${catIco(e.category)}</div><div class="einf"><div class="edsc">${esc(e.description||e.category)}</div><div class="emta"><span>${esc(e.category)}</span>${u}${src}</div></div><div class="eamt ${ii?'inc':'exp'}">${fmtAmt(e.amount,true)}</div></div>`;}
 function initRec(){const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){toast('此裝置不支援語音辨識，請使用 Chrome','err');return null;}const r=new SR();r.lang='zh-TW';r.continuous=false;r.interimResults=true;r.maxAlternatives=1;r.onstart=()=>{S.isRec=true;document.getElementById('vbtn').classList.add('rec');vh('🔴 聆聽中...',true);};r.onresult=(ev)=>{const t=Array.from(ev.results).map(r=>r[0].transcript).join('');vh(t||'聆聽中...',true);if(ev.results[ev.results.length-1].isFinal)S.lastTxt=t;};r.onend=()=>{S.isRec=false;document.getElementById('vbtn').classList.remove('rec');if(S.lastTxt)showVR(S.lastTxt);else vh('按住說話・放開辨識',false);};r.onerror=(ev)=>{S.isRec=false;document.getElementById('vbtn').classList.remove('rec');vh('按住說話・放開辨識',false);if(ev.error!=='aborted')toast('語音錯誤：'+ev.error,'err');};return r;}
 function startVoice(e){e.preventDefault();S.lastTxt='';if(!S.recognition)S.recognition=initRec();if(!S.recognition)return;try{S.recognition.start();}catch(_){}}
 function stopVoice(e){e.preventDefault();if(S.recognition&&S.isRec)S.recognition.stop();}
@@ -287,6 +315,23 @@ function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').
 function updatePeriod(){const n=new Date(),t=`${n.getFullYear()}年${n.getMonth()+1}月`;document.getElementById('hdrPeriod').textContent=t;document.getElementById('smMonth').textContent=t;}
 function loading(show){document.getElementById('loading').classList.toggle('show',show);}
 let toastT;function toast(msg,type='ok'){const el=document.getElementById('toast');el.textContent=msg;el.className=type==='err'?'err show':'show';clearTimeout(toastT);toastT=setTimeout(()=>el.classList.remove('show'),3200);}
+function toastUndo(msg,onUndo){const el=document.getElementById('toast');el.innerHTML=esc(msg)+' <span style="color:#4fd9b3;text-decoration:underline;cursor:pointer;margin-left:10px" id="undoBtn">復原</span>';el.className='show';clearTimeout(toastT);clearTimeout(S.undoTimer);S.undoTimer=setTimeout(()=>{el.classList.remove('show');S.undoData=null;},5000);document.getElementById('undoBtn').onclick=()=>{clearTimeout(S.undoTimer);el.classList.remove('show');onUndo();};}
+async function loadHistory(){updateHisM();updateHisUserBtns();const ck='his_'+S.hisYear+'_'+S.hisMonth+'_'+(S.hisUser||'all');const cached=cacheGet(ck);if(cached){S.hisEntries=cached;renderHistory();}else{loading(true);}try{const start=`${S.hisYear}-${String(S.hisMonth).padStart(2,'0')}-01`;const lastDay=new Date(S.hisYear,S.hisMonth,0).getDate();const end=`${S.hisYear}-${String(S.hisMonth).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;const p={action:'getEntries',startDate:start,endDate:end};if(S.hisUser)p.user=S.hisUser;const res=await apiGet(p);S.hisEntries=res.entries||[];cacheSet(ck,S.hisEntries);renderHistory();}catch(e){toast('載入失敗：'+e.message,'err');}loading(false);}
+function chHisM(d){S.hisMonth+=d;if(S.hisMonth>12){S.hisMonth=1;S.hisYear++;}if(S.hisMonth<1){S.hisMonth=12;S.hisYear--;}loadHistory();}
+function updateHisM(){document.getElementById('hisM').textContent=`${S.hisYear}年${S.hisMonth}月`;}
+function setHisUser(u){S.hisUser=u;loadHistory();}
+function updateHisUserBtns(){const a=document.getElementById('hf-all'),h=document.getElementById('hf-han'),j=document.getElementById('hf-jin');if(!a)return;a.className='tbtn'+(S.hisUser===''?' ai':'');h.className='tbtn'+(S.hisUser==='翰君'?' ai':'');j.className='tbtn'+(S.hisUser==='錦屏'?' ai':'');}
+function renderHistory(){const q=(document.getElementById('hisSearch').value||'').toLowerCase().trim();const filtered=S.hisEntries.filter(e=>{if(!q)return true;return String(e.amount).includes(q)||(e.description||'').toLowerCase().includes(q)||(e.category||'').toLowerCase().includes(q)||(e.note||'').toLowerCase().includes(q);});let inc=0,exp=0;filtered.forEach(e=>{if(e.amount>=0)inc+=e.amount;else exp+=Math.abs(e.amount);});document.getElementById('hisStat').textContent=`共 ${filtered.length} 筆 · 收入 $${fmtN(inc)} · 支出 $${fmtN(exp)}`;const el=document.getElementById('hisList');if(!filtered.length){el.innerHTML='<div class="empty"><div class="ei2">📜</div><p>'+(q?'查無符合':'本月無記帳')+'</p></div>';return;}const groups={};filtered.forEach(e=>{(groups[e.date]=groups[e.date]||[]).push(e);});const dates=Object.keys(groups).sort((a,b)=>b.localeCompare(a));el.innerHTML=dates.map(d=>{const items=groups[d];const dInc=items.reduce((s,e)=>s+(e.amount>=0?e.amount:0),0);const dExp=items.reduce((s,e)=>s+(e.amount<0?Math.abs(e.amount):0),0);return`<div style="margin-bottom:11px"><div style="font-size:11px;color:var(--text3);margin-bottom:4px;display:flex;justify-content:space-between;padding:0 4px"><span>${d}</span><span>${dExp?'－$'+fmtN(dExp):''} ${dInc?' ＋$'+fmtN(dInc):''}</span></div>${items.map(eHTML).join('')}</div>`;}).join('');}
+function openEdit(id){const e=S.entryCache[id];if(!e){toast('資料不存在','err');return;}S.editId=id;S.editType=e.amount>=0?'inc':'exp';S.editUser=e.user||S.user||'';document.getElementById('eAmt').value=Math.abs(e.amount);document.getElementById('eCat').value=e.category||'📦 其他';document.getElementById('eDate').value=e.date;document.getElementById('eDesc').value=e.description||'';document.getElementById('eNote').value=e.note||'';updateEditTypeBtns();updateEditUserBtns();document.getElementById('editModal').style.display='flex';}
+function closeEdit(){document.getElementById('editModal').style.display='none';S.editId=null;}
+function setEditType(t){S.editType=t;updateEditTypeBtns();if(t==='inc')document.getElementById('eCat').value='💰 收入';}
+function updateEditTypeBtns(){document.getElementById('ebE').className='tbtn'+(S.editType==='exp'?' ae':'');document.getElementById('ebI').className='tbtn'+(S.editType==='inc'?' ai':'');}
+function setEditUser(u){S.editUser=u;updateEditUserBtns();}
+function updateEditUserBtns(){document.getElementById('eUH').className='tbtn'+(S.editUser==='翰君'?' ai':'');document.getElementById('eUJ').className='tbtn'+(S.editUser==='錦屏'?' ai':'');}
+async function saveEdit(){if(!S.editId)return;const amt=parseFloat(document.getElementById('eAmt').value)||0;if(amt<=0){toast('請輸入金額','err');return;}const signed=S.editType==='inc'?Math.abs(amt):-Math.abs(amt);const patch={amount:signed,category:document.getElementById('eCat').value,date:document.getElementById('eDate').value,description:document.getElementById('eDesc').value,note:document.getElementById('eNote').value,user:S.editUser};loading(true);try{await apiPost({action:'updateEntry',id:S.editId,entry:patch});toast('✓ 已更新');invalidateCache();closeEdit();reloadCurrent();}catch(e){toast('更新失敗：'+e.message,'err');}loading(false);}
+function askDelete(){if(!confirm('確定刪除這筆記帳？'))return;deleteCurrent();}
+async function deleteCurrent(){if(!S.editId)return;const id=S.editId;const oldEntry=S.entryCache[id];loading(true);try{await apiPost({action:'deleteEntry',id:id});invalidateCache();closeEdit();reloadCurrent();S.undoData=oldEntry;toastUndo('✓ 已刪除',async()=>{if(!S.undoData)return;loading(true);try{const e=S.undoData;await apiPost({action:'addEntry',entry:{date:e.date,amount:e.amount,category:e.category,description:e.description,note:e.note,source:e.source,user:e.user}});toast('已復原');invalidateCache();reloadCurrent();}catch(err){toast('復原失敗：'+err.message,'err');}loading(false);S.undoData=null;});}catch(e){toast('刪除失敗：'+e.message,'err');}loading(false);}
+function reloadCurrent(){if(S.page==='home')loadHome();else if(S.page==='stats')loadStats();else if(S.page==='history')loadHistory();}
 </script>
 </body>
 </html>
