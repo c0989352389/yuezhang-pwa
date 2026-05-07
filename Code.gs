@@ -489,8 +489,14 @@ function _parseReceipt_(lines) {
   // 排除年份(1900-2099) — 4 碼數字無逗號小數點且在年份範圍
   const isYearLike = function (raw) { return /^(19|20)\d{2}$/.test(raw); };
   // 從一行抓所有合理金額候選
-  const extractAmounts = function (line) {
-    const m = line.match(/(\d[\d,]*(?:\.\d{1,2})?)/g);
+  const extractAmounts = function (rawLine) {
+    // 清理:中文逗號→英文逗號,且消除「數字+空白+數字」之間的空白(OCR 常把 1,280 讀成 1, 280)
+    const line = String(rawLine || '')
+      .replace(/，/g, ',')
+      .replace(/(\d)[ \t]+(?=[,\d])/g, '$1')
+      .replace(/(,)[ \t]+(?=\d)/g, '$1');
+    // 優先抓帶千分位的數字(1,280 / 12,345),再退而求其次抓純數字
+    const m = line.match(/(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)/g);
     if (!m) return [];
     return m.map(function (s) {
       const raw = s.replace(/,/g, '');
