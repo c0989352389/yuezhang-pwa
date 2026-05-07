@@ -394,7 +394,7 @@ function handleProcessOCR_(p) {
     apikey: apiKey,
     base64Image: 'data:image/jpeg;base64,' + base64,
     language: 'cht',     // 繁體中文
-    OCREngine: '3',      // engine 3 對 CJK 較好
+    OCREngine: '1',      // engine 1 支援 cht
     scale: 'true',
     isTable: 'false',
     detectOrientation: 'true',
