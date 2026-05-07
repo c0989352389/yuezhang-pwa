@@ -386,14 +386,38 @@ function handleProcessOCR_(p) {
 
   const decoded = Utilities.base64Decode(base64);
   const blob = Utilities.newBlob(decoded, mimeType, 'ocr_' + Date.now() + '.jpg');
-  const file = Drive.Files.insert(
-    { title: 'yuezhang_ocr_tmp', mimeType: 'application/vnd.google-apps.document' },
-    blob,
-    { ocr: true, ocrLanguage: 'zh-TW' }
-  );
-  const text = DocumentApp.openById(file.id).getBody().getText();
-  DriveApp.getFileById(file.id).setTrashed(true);
+
+  let fileId;
+  // Drive Advanced Service v2 用 insert(title), v3 用 create(name) — 兩種都試
+  if (typeof Drive !== 'undefined' && Drive.Files && typeof Drive.Files.insert === 'function') {
+    const f = Drive.Files.insert(
+      { title: 'yuezhang_ocr_tmp', mimeType: 'application/vnd.google-apps.document' },
+      blob,
+      { ocr: true, ocrLanguage: 'zh-TW' }
+    );
+    fileId = f.id;
+  } else if (typeof Drive !== 'undefined' && Drive.Files && typeof Drive.Files.create === 'function') {
+    const f = Drive.Files.create(
+      { name: 'yuezhang_ocr_tmp', mimeType: 'application/vnd.google-apps.document' },
+      blob,
+      { ocr: true, ocrLanguage: 'zh-TW' }
+    );
+    fileId = f.id;
+  } else {
+    throw new Error('Drive 服務未啟用 — 請至 GAS 編輯器「服務」加入 Drive API（v2 或 v3 皆可）');
+  }
+
+  const text = DocumentApp.openById(fileId).getBody().getText();
+  DriveApp.getFileById(fileId).setTrashed(true);
   return { rawText: text, transactions: parseBankText_(text) };
+}
+
+// 偵錯用:在 GAS 編輯器選此函式按執行,可確認 Drive 服務狀態
+function testDrive() {
+  if (typeof Drive === 'undefined') { Logger.log('❌ Drive 服務未載入'); return; }
+  Logger.log('Drive.Files.insert: ' + (typeof Drive.Files.insert));
+  Logger.log('Drive.Files.create: ' + (typeof Drive.Files.create));
+  Logger.log('版本判斷: ' + (typeof Drive.Files.insert === 'function' ? 'v2' : (typeof Drive.Files.create === 'function' ? 'v3' : '不明')));
 }
 
 // ============ 解析 / 分類 ============
