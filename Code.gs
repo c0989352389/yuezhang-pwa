@@ -27,6 +27,9 @@ const DEFAULT_ACCOUNTS = [
   ['匯款', '🏦', 5, 'active'],
 ];
 
+const BUDGET_SHEET = '預算設定';
+const BUDGET_HEADER = ['用戶', '類別', '月預算', '狀態'];
+
 const CATEGORY_SHEET = '類別設定';
 const CATEGORY_HEADER = ['名稱', '圖示', '排序', '狀態', '類型'];
 // 類型: expense / income / both — 影響在記帳頁顯示位置
@@ -183,7 +186,7 @@ function route_(e, payload) {
   }
 }
 
-const _WRITE_ACTIONS_ = { addEntry: 1, addEntries: 1, updateEntry: 1, deleteEntry: 1, processOCR: 0, saveAccount: 1, deleteAccount: 1, saveCategory: 1, deleteCategory: 1 };
+const _WRITE_ACTIONS_ = { addEntry: 1, addEntries: 1, updateEntry: 1, deleteEntry: 1, processOCR: 0, saveAccount: 1, deleteAccount: 1, saveCategory: 1, deleteCategory: 1, saveBudget: 1, deleteBudget: 1 };
 
 function _maybeInvalidate_(action) {
   if (_WRITE_ACTIONS_[action]) _bumpCache_();
@@ -206,6 +209,10 @@ function _dispatch_(action, payload) {
     case 'getCategories': return handleGetCategories_(payload);
     case 'saveCategory':  return handleSaveCategory_(payload);
     case 'deleteCategory':return handleDeleteCategory_(payload);
+    case 'getBudgets':    return handleGetBudgets_(payload);
+    case 'saveBudget':    return handleSaveBudget_(payload);
+    case 'deleteBudget':  return handleDeleteBudget_(payload);
+    case 'exportEntries': return handleExportEntries_(payload);
     default: throw new Error('未知 action: ' + action);
   }
 }
@@ -846,12 +853,104 @@ function handleDeleteCategory_(p) {
   throw new Error('找不到類別: ' + name);
 }
 
+// ============ 預算 ============
+
+function handleGetBudgets_(p) {
+  const sheet = _ensureSettingSheet_(BUDGET_SHEET, BUDGET_HEADER, []);
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return { budgets: [] };
+  const idx = _headerIdx_(data[0]);
+  const list = [];
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (!r[idx['類別']]) continue;
+    const status = String(r[idx['狀態']] || 'active');
+    if (status === 'inactive') continue;
+    list.push({
+      user:     String(r[idx['用戶']] || ''),
+      category: String(r[idx['類別']]),
+      monthly:  _toNumber_(r[idx['月預算']]),
+      status:   status,
+    });
+  }
+  return { budgets: list };
+}
+
+function handleSaveBudget_(p) {
+  const user = String(p.user || '').trim();
+  const category = String(p.category || '').trim();
+  if (!category) throw new Error('缺少 category');
+  const monthly = _toNumber_(p.monthly);
+  const sheet = _ensureSettingSheet_(BUDGET_SHEET, BUDGET_HEADER, []);
+  const data = sheet.getDataRange().getValues();
+  const idx = _headerIdx_(data[0]);
+  // 找現有(用戶+類別 唯一)
+  for (let i = 1; i < data.length; i++) {
+    const u = String(data[i][idx['用戶']] || '').trim();
+    const c = String(data[i][idx['類別']] || '').trim();
+    if (u === user && c === category) {
+      sheet.getRange(i + 1, idx['月預算'] + 1).setValue(monthly);
+      sheet.getRange(i + 1, idx['狀態'] + 1).setValue(p.status || 'active');
+      return { user: user, category: category, updated: true };
+    }
+  }
+  const row = new Array(data[0].length).fill('');
+  row[idx['用戶']]   = user;
+  row[idx['類別']]   = category;
+  row[idx['月預算']] = monthly;
+  row[idx['狀態']]   = p.status || 'active';
+  sheet.appendRow(row);
+  return { user: user, category: category, created: true };
+}
+
+function handleDeleteBudget_(p) {
+  const user = String(p.user || '').trim();
+  const category = String(p.category || '').trim();
+  if (!category) throw new Error('缺少 category');
+  const sheet = _ensureSettingSheet_(BUDGET_SHEET, BUDGET_HEADER, []);
+  const data = sheet.getDataRange().getValues();
+  const idx = _headerIdx_(data[0]);
+  for (let i = 1; i < data.length; i++) {
+    const u = String(data[i][idx['用戶']] || '').trim();
+    const c = String(data[i][idx['類別']] || '').trim();
+    if (u === user && c === category) {
+      sheet.deleteRow(i + 1);
+      return { user: user, category: category, deleted: true };
+    }
+  }
+  throw new Error('找不到預算: ' + (user || '共用') + '/' + category);
+}
+
+// ============ 匯出 ============
+
+function handleExportEntries_(p) {
+  const all = _getAllRows_();
+  if (!all.data.length) return { entries: [] };
+  const idx = _headerIdx_(all.header);
+  const start = p.startDate || null;
+  const end   = p.endDate   || null;
+  const userFilter = p.user ? String(p.user).trim() : '';
+  const entries = [];
+  for (let i = 0; i < all.data.length; i++) {
+    const dateStr = _toDateStr_(all.data[i][idx['日期']]);
+    if (!dateStr) continue;
+    if (start && dateStr < start) continue;
+    if (end   && dateStr > end)   continue;
+    const e = _rowToEntry_(all.data[i], idx, i + 1);
+    if (userFilter && e.user !== userFilter) continue;
+    entries.push(e);
+  }
+  entries.sort(function (a, b) { return b.date.localeCompare(a.date); });
+  return { entries: entries };
+}
+
 // ============ 初始化 ============
 
 function setup() {
   _getSheet_();
   _ensureSettingSheet_(ACCOUNT_SHEET, ACCOUNT_HEADER, DEFAULT_ACCOUNTS);
   _ensureSettingSheet_(CATEGORY_SHEET, CATEGORY_HEADER, DEFAULT_CATEGORIES);
+  _ensureSettingSheet_(BUDGET_SHEET, BUDGET_HEADER, []);
   SpreadsheetApp.flush();
   Logger.log('✅ 初始化完成');
 }
