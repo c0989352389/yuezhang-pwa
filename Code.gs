@@ -484,36 +484,62 @@ function _parseBankFormat_(lines) {
 
 // 收據/發票模式:整張單抓 1 筆支出
 function _parseReceipt_(lines) {
-  // 1. 找金額 — 優先抓「總計/合計/小計/應收/金額」附近的數字,沒有就抓最大數字
-  const TOTAL_KW = /(總\s*計|合\s*計|小\s*計|應\s*收|應\s*付|金\s*額|TOTAL)/i;
+  // 跳過這些「不是金額」的行(發票號/隨機碼/賣方/買方/統編/條碼)
+  const SKIP_LINE = /(隨機碼|賣方|買方|統一編號|統編|發票號|BR-|單號|門店|分機|電話|地址)/;
+  // 排除年份(1900-2099) — 4 碼數字無逗號小數點且在年份範圍
+  const isYearLike = function (raw) { return /^(19|20)\d{2}$/.test(raw); };
+  // 從一行抓所有合理金額候選
+  const extractAmounts = function (line) {
+    const m = line.match(/(\d[\d,]*(?:\.\d{1,2})?)/g);
+    if (!m) return [];
+    return m.map(function (s) {
+      const raw = s.replace(/,/g, '');
+      const hasComma = s.indexOf(',') !== -1;
+      const hasDecimal = s.indexOf('.') !== -1;
+      const n = parseFloat(raw);
+      return { raw: raw, n: n, hasComma: hasComma, hasDecimal: hasDecimal, str: s };
+    }).filter(function (o) {
+      if (isNaN(o.n)) return false;
+      if (o.raw.length > 7) return false; // 太長(發票號/隨機碼)
+      if (o.n < 1 || o.n >= 1000000) return false;
+      if (isYearLike(o.raw) && !o.hasComma && !o.hasDecimal) return false; // 跳過年份
+      return true;
+    });
+  };
+
+  // 1. 找金額 — 優先「總計/合計/小計/應收/金額」附近的數字
+  const TOTAL_KW = /(總\s*計|合\s*計|小\s*計|應\s*收|應\s*付|金\s*額|TOTAL|TOTAL\s*AMOUNT|消費金額)/i;
   let amount = 0;
   for (let i = 0; i < lines.length; i++) {
+    if (SKIP_LINE.test(lines[i])) continue;
     if (TOTAL_KW.test(lines[i])) {
-      const m = lines[i].match(/(\d[\d,]*(?:\.\d{1,2})?)/g);
-      if (m && m.length) {
-        const candidates = m.map(function (s) { return parseFloat(s.replace(/,/g, '')); }).filter(function (n) { return !isNaN(n) && n >= 1 && n < 1000000; });
-        if (candidates.length) { amount = Math.max.apply(null, candidates); break; }
+      // 同行優先 — 取最大候選
+      let cands = extractAmounts(lines[i]);
+      // 若同行沒有,看下一行
+      if (!cands.length && i + 1 < lines.length) cands = extractAmounts(lines[i + 1]);
+      if (cands.length) {
+        amount = cands.reduce(function (max, c) { return c.n > max ? c.n : max; }, 0);
+        break;
       }
     }
   }
+
+  // 2. 兜底 — 找最大金額(優先有逗號的,因為金額常寫 1,280)
   if (!amount) {
-    // 兜底:抓金額最大的數字(過濾掉看起來像發票號碼/隨機碼的長串數字)
-    let max = 0;
+    let bestComma = 0, bestPlain = 0;
     for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(/(\d[\d,]*(?:\.\d{1,2})?)/g);
-      if (!m) continue;
-      m.forEach(function (s) {
-        const raw = s.replace(/,/g, '');
-        if (raw.length > 7) return; // 跳過太長(發票號/隨機碼)
-        const n = parseFloat(raw);
-        if (!isNaN(n) && n >= 10 && n < 100000 && n > max) max = n;
+      if (SKIP_LINE.test(lines[i])) continue;
+      const cands = extractAmounts(lines[i]);
+      cands.forEach(function (c) {
+        if (c.hasComma && c.n > bestComma) bestComma = c.n;
+        if (!c.hasComma && c.n > bestPlain) bestPlain = c.n;
       });
     }
-    amount = max;
+    amount = bestComma || bestPlain;
   }
   if (!amount) return null;
 
-  // 2. 找日期 — 西元 yyyy/mm/dd 或 yyyy-mm-dd 或 民國 yyy年mm月dd日
+  // 3. 找日期 — 西元 yyyy/mm/dd 或 yyyy-mm-dd 或 民國 yyy年mm月dd日
   let dateStr = _today_();
   for (let i = 0; i < lines.length; i++) {
     let m = lines[i].match(/(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})/);
@@ -529,7 +555,7 @@ function _parseReceipt_(lines) {
     }
   }
 
-  // 3. 找商家名 — 第一行有中文且沒大量數字的行
+  // 4. 找商家名 — 第一行有中文且沒大量數字的行
   let merchant = '';
   for (let i = 0; i < Math.min(lines.length, 5); i++) {
     const l = lines[i];
