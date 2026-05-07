@@ -7,13 +7,13 @@
  *   2. 服務 → 加入 Drive API v2（OCR 用）
  *
  * 試算表需有以下 sheet（不存在會自動建）：
- *   記帳明細：日期、金額、類別、說明、來源、備註、ID、建立時間
+ *   記帳明細：日期、金額、類別、說明、來源、備註、ID、建立時間、用戶
  */
-const SHEET_ID = 'YOUR_GOOGLE_SHEET_ID_HERE';
+const SHEET_ID = '1LVxI70AqgM6wsZptlfI0H6WKPMiuh-tnnkLUZBSjSvA';
 const SHEET_NAME = '記帳明細';
 const TZ = 'Asia/Taipei';
 
-const ENTRY_HEADER = ['日期', '金額', '類別', '說明', '來源', '備註', 'ID', '建立時間'];
+const ENTRY_HEADER = ['日期', '金額', '類別', '說明', '來源', '備註', 'ID', '建立時間', '用戶'];
 
 const CATEGORY_MAP = {
   '🍜 餐飲': ['早餐','午餐','晚餐','飲料','咖啡','奶茶','珍奶','吃','食','餐','麵','飯','便當','外送','火鍋','燒烤','壽司','拉麵','麥當勞','肯德基','星巴克','starbucks','foodpanda','ubereats'],
@@ -29,7 +29,6 @@ const CATEGORY_MAP = {
 
 // ============ 工具函式 ============
 
-// Sheet 把日期自動轉成 Date 時用此防呆,把任何形式轉回 'yyyy-MM-dd'
 function _toDateStr_(v) {
   if (v === null || v === undefined || v === '') return '';
   if (v instanceof Date) {
@@ -54,14 +53,12 @@ function _toNumber_(v) {
   return isNaN(n) ? 0 : n;
 }
 
-// 依 header 名稱建立 idx map (避免 hard-code 陣列順序)
 function _headerIdx_(header) {
   const m = {};
   header.forEach(function (name, i) { m[String(name).trim()] = i; });
   return m;
 }
 
-// 依 header idx 把 row array 轉成 entry 物件
 function _rowToEntry_(row, idx, fallbackId) {
   return {
     id:          String(row[idx['ID']] || fallbackId),
@@ -71,6 +68,7 @@ function _rowToEntry_(row, idx, fallbackId) {
     description: String(row[idx['說明']] || ''),
     source:      String(row[idx['來源']] || 'manual'),
     note:        String(row[idx['備註']] || ''),
+    user:        String(row[idx['用戶']] != null ? row[idx['用戶']] : ''),
   };
 }
 
@@ -107,7 +105,7 @@ function route_(e, payload) {
 
 function _dispatch_(action, payload) {
   switch (action) {
-    case 'ping':          return { ok: true, ts: Date.now(), version: '1.0.0', msg: '月帳 API 正常運作' };
+    case 'ping':          return { ok: true, ts: Date.now(), version: '1.1.0', msg: '月帳 API 正常運作' };
     case 'getEntries':    return handleGetEntries_(payload);
     case 'getMonthStats': return handleGetMonthStats_(payload);
     case 'addEntry':      return handleAddEntry_(payload);
@@ -144,7 +142,19 @@ function _getSheet_() {
       .setBackground('#0d1525')
       .setFontColor('#4fd9b3');
     sheet.setFrozenRows(1);
+    return sheet;
   }
+  // 向後相容：若舊 sheet 缺欄則自動補上
+  const lastCol = sheet.getLastColumn();
+  const header = lastCol ? sheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+  const have = {};
+  header.forEach(function (h) { have[String(h).trim()] = true; });
+  ENTRY_HEADER.forEach(function (col) {
+    if (!have[col]) {
+      sheet.getRange(1, sheet.getLastColumn() + 1).setValue(col)
+        .setFontWeight('bold').setBackground('#0d1525').setFontColor('#4fd9b3');
+    }
+  });
   return sheet;
 }
 
@@ -163,8 +173,8 @@ function handleAddEntry_(p) {
   const date = entry.date || _formatDate_(now);
   const amount = _toNumber_(entry.amount);
   const category = entry.category || classifyText_(entry.description || '');
+  const user = String(p.user || entry.user || '').trim();
 
-  // 依 header idx 組 row,而不是 hard-code 順序
   const row = new Array(header.length).fill('');
   row[idx['日期']]     = date;
   row[idx['金額']]     = amount;
@@ -174,15 +184,17 @@ function handleAddEntry_(p) {
   row[idx['備註']]     = entry.note || '';
   row[idx['ID']]       = id;
   row[idx['建立時間']] = now;
+  if (idx['用戶'] != null) row[idx['用戶']] = user;
   sheet.appendRow(row);
 
-  return { id: id, category: category, amount: amount };
+  return { id: id, category: category, amount: amount, user: user };
 }
 
 function handleAddEntries_(p) {
   const entries = p.entries;
   if (!Array.isArray(entries) || !entries.length) return { added: 0 };
-  entries.forEach(function (e) { handleAddEntry_({ entry: e }); });
+  const user = p.user || '';
+  entries.forEach(function (e) { handleAddEntry_({ entry: e, user: user }); });
   return { added: entries.length };
 }
 
@@ -194,6 +206,7 @@ function handleGetEntries_(p) {
   const idx = _headerIdx_(rows[0]);
   const start = p.startDate ? p.startDate : null;
   const end   = p.endDate   ? p.endDate   : null;
+  const userFilter = p.user ? String(p.user).trim() : '';
 
   const entries = [];
   for (let i = 1; i < rows.length; i++) {
@@ -201,7 +214,9 @@ function handleGetEntries_(p) {
     if (!dateStr) continue;
     if (start && dateStr < start) continue;
     if (end   && dateStr > end)   continue;
-    entries.push(_rowToEntry_(rows[i], idx, i));
+    const entry = _rowToEntry_(rows[i], idx, i);
+    if (userFilter && entry.user !== userFilter) continue;
+    entries.push(entry);
   }
   entries.sort(function (a, b) { return b.date.localeCompare(a.date); });
   return { entries: entries };
@@ -215,17 +230,24 @@ function handleGetMonthStats_(p) {
   const now = new Date();
   const year  = parseInt(p.year, 10)  || now.getFullYear();
   const month = parseInt(p.month, 10) || (now.getMonth() + 1);
+  const userFilter = p.user ? String(p.user).trim() : '';
   const stats = { income: 0, expense: 0, categories: {}, daily: {} };
 
   if (!idx || rows.length <= 1) {
-    return { year: year, month: month, stats: stats };
+    return { year: year, month: month, stats: stats, user: userFilter };
   }
 
   const prefix = year + '-' + ('0' + month).slice(-2);
+  const userColIdx = idx['用戶'];
 
   for (let i = 1; i < rows.length; i++) {
     const dateStr = _toDateStr_(rows[i][idx['日期']]);
     if (!dateStr || dateStr.indexOf(prefix) !== 0) continue;
+
+    if (userFilter) {
+      const rowUser = userColIdx != null ? String(rows[i][userColIdx] || '').trim() : '';
+      if (rowUser !== userFilter) continue;
+    }
 
     const amount = _toNumber_(rows[i][idx['金額']]);
     const category = String(rows[i][idx['類別']] || '📦 其他');
@@ -240,7 +262,7 @@ function handleGetMonthStats_(p) {
     if (amount >= 0) stats.daily[day].income  += amount;
     else             stats.daily[day].expense += Math.abs(amount);
   }
-  return { year: year, month: month, stats: stats };
+  return { year: year, month: month, stats: stats, user: userFilter };
 }
 
 function handleProcessOCR_(p) {
