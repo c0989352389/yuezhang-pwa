@@ -1,5 +1,5 @@
 /**
- * 月帳 PWA — Google Apps Script 後端
+ * 月帳 PWA — Google Apps Script 後端 v1.2.0
  * 部署：「以網頁應用程式部署」→ 執行身分=自己 / 存取權=任何人
  *
  * 設定：
@@ -12,6 +12,7 @@
 const SHEET_ID = '1LVxI70AqgM6wsZptlfI0H6WKPMiuh-tnnkLUZBSjSvA';
 const SHEET_NAME = '記帳明細';
 const TZ = 'Asia/Taipei';
+const CACHE_TTL = 300; // 5 分鐘
 
 const ENTRY_HEADER = ['日期', '金額', '類別', '說明', '來源', '備註', 'ID', '建立時間', '用戶'];
 
@@ -26,6 +27,52 @@ const CATEGORY_MAP = {
   '💰 收入': ['薪資','薪水','工資','獎金','收入','轉帳收','匯款','退款','退稅'],
   '📊 投資': ['股票','基金','投資','理財','保險費','etf'],
 };
+
+// ============ 快取 ============
+
+function _cacheKey_(suffix) {
+  return 'yuezhang_' + suffix + '_' + _cacheVer_();
+}
+
+function _cacheVer_() {
+  const cache = CacheService.getScriptCache();
+  let v = cache.get('yuezhang_ver');
+  if (!v) {
+    v = String(Date.now());
+    cache.put('yuezhang_ver', v, CACHE_TTL);
+  }
+  return v;
+}
+
+function _bumpCache_() {
+  CacheService.getScriptCache().put('yuezhang_ver', String(Date.now()), CACHE_TTL);
+}
+
+function _cacheGet_(key) {
+  try {
+    const raw = CacheService.getScriptCache().get(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) { return null; }
+}
+
+function _cachePut_(key, val) {
+  try {
+    CacheService.getScriptCache().put(key, JSON.stringify(val), CACHE_TTL);
+  } catch (_) {}
+}
+
+// 一次讀整張表並快取（多個 handler 共用,大幅減少 sheet 讀取）
+function _getAllRows_() {
+  const cacheKey = _cacheKey_('rows');
+  const cached = _cacheGet_(cacheKey);
+  if (cached) return cached;
+
+  const sheet = _getSheet_();
+  const rows = sheet.getDataRange().getValues();
+  const result = { header: rows[0] || [], data: rows.slice(1) };
+  _cachePut_(cacheKey, result);
+  return result;
+}
 
 // ============ 工具函式 ============
 
@@ -76,6 +123,10 @@ function _formatDate_(date) {
   return Utilities.formatDate(date instanceof Date ? date : new Date(date), TZ, 'yyyy-MM-dd');
 }
 
+function _today_() {
+  return Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd');
+}
+
 // ============ HTTP 入口 ============
 
 function doGet(e) {
@@ -97,15 +148,23 @@ function route_(e, payload) {
     const action = payload.action;
     if (!action) return jsonErr('缺少 action');
     const data = _dispatch_(action, payload);
+    _maybeInvalidate_(action);
     return jsonOk(data);
   } catch (err) {
     return jsonErr(err && err.message ? err.message : String(err), 500);
   }
 }
 
+const _WRITE_ACTIONS_ = { addEntry: 1, addEntries: 1, processOCR: 0 };
+
+function _maybeInvalidate_(action) {
+  if (_WRITE_ACTIONS_[action]) _bumpCache_();
+}
+
 function _dispatch_(action, payload) {
   switch (action) {
-    case 'ping':          return { ok: true, ts: Date.now(), version: '1.1.0', msg: '月帳 API 正常運作' };
+    case 'ping':          return { ok: true, ts: Date.now(), version: '1.2.0', msg: '月帳 API 正常運作' };
+    case 'getHomeData':   return handleGetHomeData_(payload);
     case 'getEntries':    return handleGetEntries_(payload);
     case 'getMonthStats': return handleGetMonthStats_(payload);
     case 'addEntry':      return handleAddEntry_(payload);
@@ -144,7 +203,6 @@ function _getSheet_() {
     sheet.setFrozenRows(1);
     return sheet;
   }
-  // 向後相容：若舊 sheet 缺欄則自動補上
   const lastCol = sheet.getLastColumn();
   const header = lastCol ? sheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
   const have = {};
@@ -159,6 +217,65 @@ function _getSheet_() {
 }
 
 // ============ Handler ============
+
+// 一次回首頁需要的全部資料(今日明細+本月統計),省一次冷啟動
+function handleGetHomeData_(p) {
+  const userFilter = p.user ? String(p.user).trim() : '';
+  const all = _getAllRows_();
+  const idx = _headerIdx_(all.header);
+  const userColIdx = idx['用戶'];
+
+  const now = new Date();
+  const year  = parseInt(p.year, 10)  || now.getFullYear();
+  const month = parseInt(p.month, 10) || (now.getMonth() + 1);
+  const today = _today_();
+  const monthPrefix = year + '-' + ('0' + month).slice(-2);
+
+  const todayEntries = [];
+  const stats = { income: 0, expense: 0, categories: {}, daily: {} };
+
+  for (let i = 0; i < all.data.length; i++) {
+    const row = all.data[i];
+    const dateStr = _toDateStr_(row[idx['日期']]);
+    if (!dateStr) continue;
+
+    if (userFilter && userColIdx != null) {
+      const rowUser = String(row[userColIdx] || '').trim();
+      if (rowUser !== userFilter) continue;
+    }
+
+    // 本月統計
+    if (dateStr.indexOf(monthPrefix) === 0) {
+      const amount = _toNumber_(row[idx['金額']]);
+      const category = String(row[idx['類別']] || '📦 其他');
+      const day = parseInt(dateStr.substring(8, 10), 10);
+
+      if (amount >= 0) stats.income += amount;
+      else             stats.expense += Math.abs(amount);
+
+      stats.categories[category] = (stats.categories[category] || 0) + Math.abs(amount);
+
+      if (!stats.daily[day]) stats.daily[day] = { income: 0, expense: 0 };
+      if (amount >= 0) stats.daily[day].income  += amount;
+      else             stats.daily[day].expense += Math.abs(amount);
+    }
+
+    // 今日明細
+    if (dateStr === today) {
+      todayEntries.push(_rowToEntry_(row, idx, i + 1));
+    }
+  }
+
+  todayEntries.sort(function (a, b) { return b.date.localeCompare(a.date); });
+  return {
+    today: today,
+    entries: todayEntries,
+    year: year,
+    month: month,
+    stats: stats,
+    user: userFilter,
+  };
+}
 
 function handleAddEntry_(p) {
   const entry = p.entry;
@@ -199,22 +316,21 @@ function handleAddEntries_(p) {
 }
 
 function handleGetEntries_(p) {
-  const sheet = _getSheet_();
-  const rows = sheet.getDataRange().getValues();
-  if (rows.length <= 1) return { entries: [] };
+  const all = _getAllRows_();
+  if (!all.data.length) return { entries: [] };
 
-  const idx = _headerIdx_(rows[0]);
+  const idx = _headerIdx_(all.header);
   const start = p.startDate ? p.startDate : null;
   const end   = p.endDate   ? p.endDate   : null;
   const userFilter = p.user ? String(p.user).trim() : '';
 
   const entries = [];
-  for (let i = 1; i < rows.length; i++) {
-    const dateStr = _toDateStr_(rows[i][idx['日期']]);
+  for (let i = 0; i < all.data.length; i++) {
+    const dateStr = _toDateStr_(all.data[i][idx['日期']]);
     if (!dateStr) continue;
     if (start && dateStr < start) continue;
     if (end   && dateStr > end)   continue;
-    const entry = _rowToEntry_(rows[i], idx, i);
+    const entry = _rowToEntry_(all.data[i], idx, i + 1);
     if (userFilter && entry.user !== userFilter) continue;
     entries.push(entry);
   }
@@ -223,9 +339,8 @@ function handleGetEntries_(p) {
 }
 
 function handleGetMonthStats_(p) {
-  const sheet = _getSheet_();
-  const rows = sheet.getDataRange().getValues();
-  const idx = rows.length ? _headerIdx_(rows[0]) : null;
+  const all = _getAllRows_();
+  const idx = all.data.length ? _headerIdx_(all.header) : null;
 
   const now = new Date();
   const year  = parseInt(p.year, 10)  || now.getFullYear();
@@ -233,24 +348,23 @@ function handleGetMonthStats_(p) {
   const userFilter = p.user ? String(p.user).trim() : '';
   const stats = { income: 0, expense: 0, categories: {}, daily: {} };
 
-  if (!idx || rows.length <= 1) {
-    return { year: year, month: month, stats: stats, user: userFilter };
-  }
+  if (!idx) return { year: year, month: month, stats: stats, user: userFilter };
 
   const prefix = year + '-' + ('0' + month).slice(-2);
   const userColIdx = idx['用戶'];
 
-  for (let i = 1; i < rows.length; i++) {
-    const dateStr = _toDateStr_(rows[i][idx['日期']]);
+  for (let i = 0; i < all.data.length; i++) {
+    const row = all.data[i];
+    const dateStr = _toDateStr_(row[idx['日期']]);
     if (!dateStr || dateStr.indexOf(prefix) !== 0) continue;
 
     if (userFilter) {
-      const rowUser = userColIdx != null ? String(rows[i][userColIdx] || '').trim() : '';
+      const rowUser = userColIdx != null ? String(row[userColIdx] || '').trim() : '';
       if (rowUser !== userFilter) continue;
     }
 
-    const amount = _toNumber_(rows[i][idx['金額']]);
-    const category = String(rows[i][idx['類別']] || '📦 其他');
+    const amount = _toNumber_(row[idx['金額']]);
+    const category = String(row[idx['類別']] || '📦 其他');
     const day = parseInt(dateStr.substring(8, 10), 10);
 
     if (amount >= 0) stats.income += amount;
