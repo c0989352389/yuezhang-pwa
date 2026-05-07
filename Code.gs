@@ -1,10 +1,11 @@
 /**
- * 月帳 PWA — Google Apps Script 後端 v1.2.0
+ * 月帳 PWA — Google Apps Script 後端 v1.4.0
  * 部署：「以網頁應用程式部署」→ 執行身分=自己 / 存取權=任何人
  *
  * 設定：
  *   1. 將 SHEET_ID 替換為你的 Google 試算表 ID
- *   2. 服務 → 加入 Drive API v2（OCR 用）
+ *   2. 專案設定 → 指令碼屬性 → 新增 OCR_SPACE_API_KEY (註冊 https://ocr.space/ocrapi 拿 free key)
+ *   3. (Drive API 已不需要,可以移除)
  *
  * 試算表需有以下 sheet（不存在會自動建）：
  *   記帳明細：日期、金額、類別、說明、來源、備註、ID、建立時間、用戶
@@ -379,45 +380,56 @@ function handleGetMonthStats_(p) {
   return { year: year, month: month, stats: stats, user: userFilter };
 }
 
+// OCR 改用 OCR.space API (Google Drive OCR 上傳已停用)
+const OCR_API_URL = 'https://api.ocr.space/parse/image';
+
 function handleProcessOCR_(p) {
   const base64 = p.imageBase64;
-  const mimeType = p.mimeType || 'image/jpeg';
   if (!base64) throw new Error('缺少 imageBase64');
 
-  const decoded = Utilities.base64Decode(base64);
-  const blob = Utilities.newBlob(decoded, mimeType, 'ocr_' + Date.now() + '.jpg');
+  const apiKey = PropertiesService.getScriptProperties().getProperty('OCR_SPACE_API_KEY');
+  if (!apiKey) throw new Error('未設定 OCR_SPACE_API_KEY,請至 GAS 專案設定 → 指令碼屬性新增');
 
-  let fileId;
-  // Drive Advanced Service v2 用 insert(title), v3 用 create(name) — 兩種都試
-  if (typeof Drive !== 'undefined' && Drive.Files && typeof Drive.Files.insert === 'function') {
-    const f = Drive.Files.insert(
-      { title: 'yuezhang_ocr_tmp', mimeType: 'application/vnd.google-apps.document' },
-      blob,
-      { ocr: true, ocrLanguage: 'zh-TW' }
-    );
-    fileId = f.id;
-  } else if (typeof Drive !== 'undefined' && Drive.Files && typeof Drive.Files.create === 'function') {
-    const f = Drive.Files.create(
-      { name: 'yuezhang_ocr_tmp', mimeType: 'application/vnd.google-apps.document' },
-      blob,
-      { ocr: true, ocrLanguage: 'zh-TW' }
-    );
-    fileId = f.id;
-  } else {
-    throw new Error('Drive 服務未啟用 — 請至 GAS 編輯器「服務」加入 Drive API（v2 或 v3 皆可）');
+  const payload = {
+    apikey: apiKey,
+    base64Image: 'data:image/jpeg;base64,' + base64,
+    language: 'cht',     // 繁體中文
+    OCREngine: '3',      // engine 3 對 CJK 較好
+    scale: 'true',
+    isTable: 'false',
+    detectOrientation: 'true',
+  };
+
+  const res = UrlFetchApp.fetch(OCR_API_URL, {
+    method: 'post',
+    payload: payload,
+    muteHttpExceptions: true,
+  });
+
+  const code = res.getResponseCode();
+  const body = res.getContentText();
+  if (code !== 200) {
+    throw new Error('OCR API HTTP ' + code + ': ' + body.substring(0, 200));
   }
 
-  const text = DocumentApp.openById(fileId).getBody().getText();
-  DriveApp.getFileById(fileId).setTrashed(true);
+  let json;
+  try { json = JSON.parse(body); } catch (e) { throw new Error('OCR 回應非 JSON: ' + body.substring(0, 200)); }
+
+  if (json.IsErroredOnProcessing) {
+    const msg = json.ErrorMessage;
+    const errStr = (msg && msg.join) ? msg.join('; ') : (msg || '未知錯誤');
+    throw new Error('OCR 解析失敗: ' + errStr);
+  }
+
+  const text = (json.ParsedResults && json.ParsedResults[0] && json.ParsedResults[0].ParsedText) || '';
   return { rawText: text, transactions: parseBankText_(text) };
 }
 
-// 偵錯用:在 GAS 編輯器選此函式按執行,可確認 Drive 服務狀態
-function testDrive() {
-  if (typeof Drive === 'undefined') { Logger.log('❌ Drive 服務未載入'); return; }
-  Logger.log('Drive.Files.insert: ' + (typeof Drive.Files.insert));
-  Logger.log('Drive.Files.create: ' + (typeof Drive.Files.create));
-  Logger.log('版本判斷: ' + (typeof Drive.Files.insert === 'function' ? 'v2' : (typeof Drive.Files.create === 'function' ? 'v3' : '不明')));
+// 偵錯用:確認 OCR_SPACE_API_KEY 是否設好
+function testOcrKey() {
+  const k = PropertiesService.getScriptProperties().getProperty('OCR_SPACE_API_KEY');
+  if (!k) { Logger.log('❌ OCR_SPACE_API_KEY 未設定'); return; }
+  Logger.log('✅ API key 已設定,前 4 碼: ' + k.substring(0, 4) + '...');
 }
 
 // ============ 解析 / 分類 ============
