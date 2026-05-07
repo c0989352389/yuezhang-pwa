@@ -1,0 +1,19 @@
+{
+  "name": "月帳 — 每日記帳工具",
+  "short_name": "月帳",
+  "description": "語音記帳・OCR 對帳・收支統計",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#070d1a",
+  "theme_color": "#070d1a",
+  "orientation": "portrait-primary",
+  "lang": "zh-TW",
+  "categories": ["finance", "productivity"],
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "shortcuts": [
+    { "name": "快速記帳", "short_name": "記帳", "url": "./?page=record", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] }
+  ]
+}
