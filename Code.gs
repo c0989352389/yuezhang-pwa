@@ -399,7 +399,15 @@ function handleProcessOCR_(p) {
 // ============ 解析 / 分類 ============
 
 function parseBankText_(text) {
-  const lines = String(text || '').split('\n').map(function (l) { return l.trim(); }).filter(function (l) { return l.length > 3; });
+  const lines = String(text || '').split('\n').map(function (l) { return l.trim(); }).filter(function (l) { return l.length > 1; });
+  const bank = _parseBankFormat_(lines);
+  if (bank.length) return bank;
+  // 找不到銀行對帳單格式 → 試試收據/發票
+  const r = _parseReceipt_(lines);
+  return r ? [r] : [];
+}
+
+function _parseBankFormat_(lines) {
   const results = [];
   const P1 = /^(\d{1,2})[\/\-](\d{1,2})\s+(.+?)\s+([\+\-]?\d[\d,]*(?:\.\d{1,2})?)$/;
   const P2 = /^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})\s+(.+?)\s+([\+\-]?\d[\d,]*(?:\.\d{1,2})?)$/;
@@ -436,6 +444,73 @@ function parseBankText_(text) {
     }
   }
   return results;
+}
+
+// 收據/發票模式:整張單抓 1 筆支出
+function _parseReceipt_(lines) {
+  // 1. 找金額 — 優先抓「總計/合計/小計/應收/金額」附近的數字,沒有就抓最大數字
+  const TOTAL_KW = /(總\s*計|合\s*計|小\s*計|應\s*收|應\s*付|金\s*額|TOTAL)/i;
+  let amount = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (TOTAL_KW.test(lines[i])) {
+      const m = lines[i].match(/(\d[\d,]*(?:\.\d{1,2})?)/g);
+      if (m && m.length) {
+        const candidates = m.map(function (s) { return parseFloat(s.replace(/,/g, '')); }).filter(function (n) { return !isNaN(n) && n >= 1 && n < 1000000; });
+        if (candidates.length) { amount = Math.max.apply(null, candidates); break; }
+      }
+    }
+  }
+  if (!amount) {
+    // 兜底:抓金額最大的數字(過濾掉看起來像發票號碼/隨機碼的長串數字)
+    let max = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/(\d[\d,]*(?:\.\d{1,2})?)/g);
+      if (!m) continue;
+      m.forEach(function (s) {
+        const raw = s.replace(/,/g, '');
+        if (raw.length > 7) return; // 跳過太長(發票號/隨機碼)
+        const n = parseFloat(raw);
+        if (!isNaN(n) && n >= 10 && n < 100000 && n > max) max = n;
+      });
+    }
+    amount = max;
+  }
+  if (!amount) return null;
+
+  // 2. 找日期 — 西元 yyyy/mm/dd 或 yyyy-mm-dd 或 民國 yyy年mm月dd日
+  let dateStr = _today_();
+  for (let i = 0; i < lines.length; i++) {
+    let m = lines[i].match(/(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})/);
+    if (m) {
+      dateStr = m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+      break;
+    }
+    m = lines[i].match(/(\d{2,3})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+    if (m) {
+      const y = parseInt(m[1], 10) + (parseInt(m[1], 10) > 200 ? 0 : 1911);
+      dateStr = y + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+      break;
+    }
+  }
+
+  // 3. 找商家名 — 第一行有中文且沒大量數字的行
+  let merchant = '';
+  for (let i = 0; i < Math.min(lines.length, 5); i++) {
+    const l = lines[i];
+    if (/[一-龥]{2,}/.test(l) && (l.match(/\d/g) || []).length < 4) {
+      merchant = l.replace(/[\s\-_]+$/, '').substring(0, 30);
+      break;
+    }
+  }
+  if (!merchant) merchant = '收據';
+
+  return {
+    date: dateStr,
+    amount: -Math.abs(amount), // 收據預設為支出
+    description: merchant,
+    category: classifyText_(merchant),
+    source: 'ocr',
+  };
 }
 
 function classifyText_(text) {
