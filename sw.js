@@ -1,4 +1,4 @@
-const CACHE = 'yuezhang-v1.3';
+const CACHE = 'yuezhang-v1.4';
 const STATIC = ['./manifest.json'];
 
 self.addEventListener('install', e => {
