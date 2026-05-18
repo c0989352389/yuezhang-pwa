@@ -186,7 +186,7 @@ function route_(e, payload) {
   }
 }
 
-const _WRITE_ACTIONS_ = { addEntry: 1, addEntries: 1, updateEntry: 1, deleteEntry: 1, processOCR: 0, saveAccount: 1, deleteAccount: 1, saveCategory: 1, deleteCategory: 1, saveBudget: 1, deleteBudget: 1 };
+const _WRITE_ACTIONS_ = { addEntry: 1, addEntries: 1, updateEntry: 1, deleteEntry: 1, processOCR: 0, saveAccount: 1, deleteAccount: 1, saveCategory: 1, deleteCategory: 1, saveBudget: 1, deleteBudget: 1, saveAsset: 1, deleteAsset: 1, addSnapshot: 1, deleteSnapshot: 1 };
 
 function _maybeInvalidate_(action) {
   if (_WRITE_ACTIONS_[action]) _bumpCache_();
@@ -213,6 +213,12 @@ function _dispatch_(action, payload) {
     case 'saveBudget':    return handleSaveBudget_(payload);
     case 'deleteBudget':  return handleDeleteBudget_(payload);
     case 'exportEntries': return handleExportEntries_(payload);
+    case 'getAssets':     return handleGetAssets_(payload);
+    case 'saveAsset':     return handleSaveAsset_(payload);
+    case 'deleteAsset':   return handleDeleteAsset_(payload);
+    case 'getSnapshots':  return handleGetSnapshots_(payload);
+    case 'addSnapshot':   return handleAddSnapshot_(payload);
+    case 'deleteSnapshot':return handleDeleteSnapshot_(payload);
     default: throw new Error('未知 action: ' + action);
   }
 }
@@ -953,4 +959,432 @@ function setup() {
   _ensureSettingSheet_(BUDGET_SHEET, BUDGET_HEADER, []);
   SpreadsheetApp.flush();
   Logger.log('✅ 初始化完成');
+}
+
+// ============================================================
+//  🔄 Notion 同步（從「給小助理的指令」拉記帳 → 月帳 Sheet）
+// ============================================================
+
+const NOTION_VERSION = '2022-06-28';
+const NOTION_DEFAULT_USER = '翰君';
+
+/**
+ * 主同步函式
+ * 建議觸發：時間驅動，每小時一次
+ *
+ * 流程：
+ * 1) 從 Notion「給小助理的指令」拉 (類型=記帳 AND 狀態=待處理)
+ * 2) 解析每筆 → 寫入記帳明細 sheet
+ * 3) 更新 Notion 狀態=已完成 + 處理結果
+ *
+ * 指令碼屬性需求：
+ *   - NOTION_TOKEN（Notion Internal Integration Token）
+ *   - NOTION_INSTRUCTION_DB（給小助理的指令 DB ID，預設 34ecfecdc26a81c38e29fda446de750d）
+ */
+function syncFromNotion() {
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty('NOTION_TOKEN');
+  const dbId = props.getProperty('NOTION_INSTRUCTION_DB') || '34ecfecdc26a81c38e29fda446de750d';
+
+  if (!token) {
+    Logger.log('❌ NOTION_TOKEN 未設定');
+    return { ok: false, error: 'NOTION_TOKEN 未設定' };
+  }
+
+  Logger.log('🔄 開始從 Notion 同步記帳...');
+  const pendingPages = _notionQuery_(token, dbId, {
+    filter: {
+      and: [
+        { property: '狀態', select: { equals: '待處理' } },
+        { property: '類型', select: { equals: '記帳' } }
+      ]
+    }
+  });
+  Logger.log('待處理記帳指令：' + pendingPages.length + ' 筆');
+
+  if (!pendingPages.length) return { ok: true, processed: 0, entries: 0 };
+
+  let totalEntries = 0;
+  let totalFailed = 0;
+
+  for (const page of pendingPages) {
+    const pageId = page.id;
+    const commandText = _notionExtractTitle_(page);
+    const processResultText = _notionExtractRichText_(page, '處理結果');
+    const createdDate = (page.created_time || '').substring(0, 10) || _today_();
+
+    // 先試 LINE webhook 已寫好的 JSON，沒有的話本地重新解析
+    let items = _tryParseJsonItems_(processResultText);
+    if (!items.length) items = _parseExpensesLocal_(commandText);
+
+    if (!items.length) {
+      _notionUpdate_(token, pageId, '需確認', '記帳同步失敗：無法解析金額。原指令：' + commandText.substring(0, 100));
+      totalFailed++;
+      continue;
+    }
+
+    let successCount = 0;
+    const lines = [];
+    for (const item of items) {
+      try {
+        const r = handleAddEntry_({
+          entry: {
+            date: createdDate,
+            amount: -Math.abs(item.amount), // 支出為負
+            category: item.category || '📦 其他',
+            description: item.description || '',
+            source: 'line',
+            note: '由 LINE 小助理同步'
+          },
+          user: NOTION_DEFAULT_USER
+        });
+        successCount++;
+        lines.push('✓ ' + item.description + ' NT$' + item.amount + ' → ' + (item.category || '📦 其他') + ' (id:' + r.id + ')');
+      } catch (err) {
+        lines.push('✗ ' + item.description + ' 失敗：' + err);
+      }
+    }
+
+    _bumpCache_();
+    _notionUpdate_(token, pageId, '已完成',
+      '已寫入月帳 ' + successCount + '/' + items.length + ' 筆\n' + lines.join('\n'));
+    totalEntries += successCount;
+  }
+
+  Logger.log('✅ 同步完成。指令 ' + pendingPages.length + ' 筆 / 寫入 ' + totalEntries + ' 筆 / 失敗 ' + totalFailed + ' 筆');
+  return { ok: true, processed: pendingPages.length, entries: totalEntries, failed: totalFailed };
+}
+
+/**
+ * 一次性設定每小時觸發器
+ */
+function setupNotionSyncTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'syncFromNotion') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('syncFromNotion')
+    .timeBased()
+    .everyHours(1)
+    .create();
+  Logger.log('✅ 已建立每小時觸發器：syncFromNotion');
+}
+
+function testSyncFromNotion() {
+  const r = syncFromNotion();
+  Logger.log(JSON.stringify(r));
+}
+
+// ============================================================
+//  Notion API helpers
+// ============================================================
+
+function _notionQuery_(token, dbId, payload) {
+  let all = [];
+  let cursor = undefined;
+  do {
+    const p = {};
+    if (payload && payload.filter) p.filter = payload.filter;
+    p.page_size = 100;
+    if (cursor) p.start_cursor = cursor;
+
+    const resp = UrlFetchApp.fetch('https://api.notion.com/v1/databases/' + dbId + '/query', {
+      method: 'post',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Notion-Version': NOTION_VERSION,
+        'Content-Type': 'application/json'
+      },
+      payload: JSON.stringify(p),
+      muteHttpExceptions: true
+    });
+    if (resp.getResponseCode() !== 200) {
+      Logger.log('Notion query 失敗：' + resp.getResponseCode() + ' ' + resp.getContentText().substring(0, 200));
+      break;
+    }
+    const data = JSON.parse(resp.getContentText());
+    all = all.concat(data.results || []);
+    cursor = data.has_more ? data.next_cursor : undefined;
+  } while (cursor);
+  return all;
+}
+
+function _notionUpdate_(token, pageId, status, processResult) {
+  const truncated = (processResult || '').length > 1900
+    ? processResult.substring(0, 1900) + '...'
+    : (processResult || '');
+  const properties = {};
+  if (status) properties['狀態'] = { select: { name: status } };
+  if (truncated) properties['處理結果'] = { rich_text: [{ text: { content: truncated } }] };
+  try {
+    UrlFetchApp.fetch('https://api.notion.com/v1/pages/' + pageId, {
+      method: 'patch',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Notion-Version': NOTION_VERSION,
+        'Content-Type': 'application/json'
+      },
+      payload: JSON.stringify({ properties: properties }),
+      muteHttpExceptions: true
+    });
+  } catch (err) {
+    Logger.log('_notionUpdate_ 失敗：' + err);
+  }
+}
+
+function _notionExtractTitle_(page) {
+  const props = page.properties || {};
+  for (const name of Object.keys(props)) {
+    if (props[name].type === 'title') {
+      return (props[name].title || []).map(function (t) { return t.plain_text; }).join('');
+    }
+  }
+  return '';
+}
+
+function _notionExtractRichText_(page, propName) {
+  const prop = (page.properties || {})[propName];
+  if (!prop || prop.type !== 'rich_text') return '';
+  return (prop.rich_text || []).map(function (t) { return t.plain_text; }).join('');
+}
+
+// ============================================================
+//  本地解析（與 LINE webhook 一致的 parseMultipleExpenses）
+// ============================================================
+
+/**
+ * 嘗試從處理結果裡的 JSON:[...] 抽出已解析的 items
+ */
+function _tryParseJsonItems_(processResultText) {
+  if (!processResultText) return [];
+  const m = processResultText.match(/JSON:(\[[\s\S]*?\])/);
+  if (!m) return [];
+  try {
+    const arr = JSON.parse(m[1]);
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * 與 LINE Webhook 的 parseMultipleExpenses 同邏輯
+ */
+function _parseExpensesLocal_(text) {
+  if (!text) return [];
+  const cleaned = text.replace(/^(花了|付了|繳了)/, '').trim();
+  const segments = cleaned.split(/[，,、;；\n]+|\s{2,}/)
+    .map(function (s) { return s.trim(); })
+    .filter(function (s) { return s.length > 0; });
+  const results = [];
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const m = seg.match(/^(.+?)\s*(?:花|付)?\s*(\d{1,7})\s*[元塊]?\s*$/);
+    if (m) {
+      const description = m[1].trim();
+      const amount = parseInt(m[2], 10);
+      if (description && amount > 0 && description.length <= 30) {
+        results.push({
+          description: description,
+          amount: amount,
+          category: _classifyExpenseLocal_(description)
+        });
+      }
+    }
+  }
+  return results;
+}
+
+// ============ 資產盤點 ============
+
+const ASSET_SHEET = '資產帳戶';
+const ASSET_HEADER = ['ID', '名稱', '類型', '銀行', '排序', '狀態', '建立時間'];
+// 類型: cash / bank
+
+const SNAPSHOT_SHEET = '資產快照';
+const SNAPSHOT_HEADER = ['ID', '日期', '帳戶ID', '帳戶名稱', '金額', '備註', '建立時間'];
+
+function handleGetAssets_(p) {
+  const sheet = _ensureSettingSheet_(ASSET_SHEET, ASSET_HEADER, null);
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return { assets: [] };
+  const idx = _headerIdx_(data[0]);
+  const includeInactive = !!p.includeInactive;
+  const out = [];
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (!r[idx['ID']]) continue;
+    const status = String(r[idx['狀態']] || 'active');
+    if (!includeInactive && status === 'inactive') continue;
+    out.push({
+      id: String(r[idx['ID']]),
+      name: String(r[idx['名稱']] || ''),
+      type: String(r[idx['類型']] || 'bank'),
+      bank: String(r[idx['銀行']] || ''),
+      sort: Number(r[idx['排序']]) || 0,
+      status: status
+    });
+  }
+  out.sort(function (a, b) { return (a.sort - b.sort) || a.name.localeCompare(b.name); });
+  return { assets: out };
+}
+
+function handleSaveAsset_(p) {
+  const name = String(p.name || '').trim();
+  if (!name) throw new Error('缺少名稱');
+  const type = String(p.type || '').trim();
+  if (type !== 'cash' && type !== 'bank') throw new Error('類型必須是 cash 或 bank');
+  const bank = type === 'bank' ? String(p.bank || '').trim() : '';
+  if (type === 'bank' && !bank) throw new Error('銀行類必須填寫銀行名');
+  const sheet = _ensureSettingSheet_(ASSET_SHEET, ASSET_HEADER, null);
+  const data = sheet.getDataRange().getValues();
+  const idx = _headerIdx_(data[0]);
+  const id = String(p.id || '').trim();
+
+  if (id) {
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][idx['ID']]) === id) {
+        sheet.getRange(i + 1, idx['名稱'] + 1).setValue(name);
+        sheet.getRange(i + 1, idx['類型'] + 1).setValue(type);
+        sheet.getRange(i + 1, idx['銀行'] + 1).setValue(bank);
+        if (p.sort !== undefined) sheet.getRange(i + 1, idx['排序'] + 1).setValue(Number(p.sort) || 0);
+        if (p.status !== undefined) sheet.getRange(i + 1, idx['狀態'] + 1).setValue(p.status);
+        return { id: id, updated: true };
+      }
+    }
+    throw new Error('找不到帳戶: ' + id);
+  }
+
+  const newId = Utilities.getUuid().substring(0, 8);
+  const row = new Array(data[0].length).fill('');
+  row[idx['ID']] = newId;
+  row[idx['名稱']] = name;
+  row[idx['類型']] = type;
+  row[idx['銀行']] = bank;
+  row[idx['排序']] = Number(p.sort) || (data.length);
+  row[idx['狀態']] = p.status || 'active';
+  row[idx['建立時間']] = new Date();
+  sheet.appendRow(row);
+  return { id: newId, created: true };
+}
+
+function handleDeleteAsset_(p) {
+  const id = String(p.id || '').trim();
+  if (!id) throw new Error('缺少 id');
+  const sheet = _ensureSettingSheet_(ASSET_SHEET, ASSET_HEADER, null);
+  const data = sheet.getDataRange().getValues();
+  const idx = _headerIdx_(data[0]);
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idx['ID']]) === id) {
+      sheet.deleteRow(i + 1);
+      return { id: id, deleted: true };
+    }
+  }
+  throw new Error('找不到帳戶: ' + id);
+}
+
+function handleGetSnapshots_(p) {
+  const sheet = _ensureSettingSheet_(SNAPSHOT_SHEET, SNAPSHOT_HEADER, null);
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return { snapshots: [] };
+  const idx = _headerIdx_(data[0]);
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (!r[idx['ID']]) continue;
+    rows.push({
+      id: String(r[idx['ID']]),
+      date: _toDateStr_(r[idx['日期']]),
+      accountId: String(r[idx['帳戶ID']]),
+      accountName: String(r[idx['帳戶名稱']] || ''),
+      amount: Number(r[idx['金額']]) || 0,
+      note: String(r[idx['備註']] || ''),
+      createdAt: _toDateTimeStr_(r[idx['建立時間']])
+    });
+  }
+  rows.sort(function (a, b) {
+    if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+    return a.createdAt < b.createdAt ? -1 : 1;
+  });
+  return { snapshots: rows };
+}
+
+function handleAddSnapshot_(p) {
+  const date = String(p.date || '').trim();
+  if (!date) throw new Error('缺少日期');
+  const items = Array.isArray(p.items) ? p.items : [];
+  if (!items.length) throw new Error('沒有要記錄的金額');
+
+  const assets = handleGetAssets_({}).assets;
+  const assetMap = {};
+  assets.forEach(function (a) { assetMap[a.id] = a; });
+
+  const sheet = _ensureSettingSheet_(SNAPSHOT_SHEET, SNAPSHOT_HEADER, null);
+  const data = sheet.getDataRange().getValues();
+  const idx = _headerIdx_(data[0]);
+  const now = new Date();
+  const note = String(p.note || '');
+  const created = [];
+
+  items.forEach(function (it) {
+    const aid = String(it.accountId || '').trim();
+    if (!aid || !assetMap[aid]) return;
+    const amount = Number(it.amount);
+    if (!isFinite(amount)) return;
+    const row = new Array(data[0].length).fill('');
+    const id = Utilities.getUuid().substring(0, 8);
+    row[idx['ID']] = id;
+    row[idx['日期']] = date;
+    row[idx['帳戶ID']] = aid;
+    row[idx['帳戶名稱']] = assetMap[aid].name;
+    row[idx['金額']] = amount;
+    row[idx['備註']] = note;
+    row[idx['建立時間']] = now;
+    sheet.appendRow(row);
+    created.push(id);
+  });
+
+  return { created: created.length, ids: created };
+}
+
+function handleDeleteSnapshot_(p) {
+  const id = String(p.id || '').trim();
+  const date = String(p.date || '').trim();
+  if (!id && !date) throw new Error('缺少 id 或 date');
+  const sheet = _ensureSettingSheet_(SNAPSHOT_SHEET, SNAPSHOT_HEADER, null);
+  const data = sheet.getDataRange().getValues();
+  const idx = _headerIdx_(data[0]);
+  let deleted = 0;
+  for (let i = data.length - 1; i >= 1; i--) {
+    const r = data[i];
+    if (id && String(r[idx['ID']]) === id) { sheet.deleteRow(i + 1); deleted++; }
+    else if (!id && date && _toDateStr_(r[idx['日期']]) === date) { sheet.deleteRow(i + 1); deleted++; }
+  }
+  if (!deleted) throw new Error('找不到快照');
+  return { deleted: deleted };
+}
+
+function _toDateStr_(v) {
+  if (!v) return '';
+  if (v instanceof Date) return Utilities.formatDate(v, TZ, 'yyyy-MM-dd');
+  return String(v).substring(0, 10);
+}
+
+function _toDateTimeStr_(v) {
+  if (!v) return '';
+  if (v instanceof Date) return Utilities.formatDate(v, TZ, 'yyyy-MM-dd HH:mm:ss');
+  return String(v);
+}
+
+function _classifyExpenseLocal_(text) {
+  if (!text) return '📦 其他';
+  if (/早餐|午餐|晚餐|宵夜|飲料|咖啡|奶茶|珍奶|吃|食|餐|麵|飯|便當|外送|火鍋|燒烤|壽司|拉麵|麥當勞|肯德基|星巴克|foodpanda|ubereats/i.test(text)) return '🍜 餐飲';
+  if (/捷運|mrt|公車|計程車|taxi|uber|停車|加油|油費|youbike|ubike|火車|高鐵|台鐵|機票/i.test(text)) return '🚌 交通';
+  if (/買|超商|7-11|全家|全聯|超市|好市多|costco|大潤發|衣服|鞋子|包包|網購|momo|pchome|蝦皮/i.test(text)) return '🛍️ 購物';
+  if (/電影|遊戲|ktv|旅遊|旅行|門票|展覽|課程|訂閱|netflix|spotify|健身/i.test(text)) return '🎬 娛樂';
+  if (/藥|診所|醫院|掛號|健保|醫療|牙醫|眼科|健檢/i.test(text)) return '💊 醫療';
+  if (/水費|電費|瓦斯|房租|管理費|修繕|家具|家電|清潔用品/i.test(text)) return '🏠 住家';
+  if (/電話費|網路費|手機費|wifi|電信|中華電信|遠傳|台哥大/i.test(text)) return '📱 通訊';
+  if (/薪資|薪水|工資|獎金|收入|退款|退稅/i.test(text)) return '💰 收入';
+  if (/股票|基金|投資|理財|保險費|etf/i.test(text)) return '📊 投資';
+  return '📦 其他';
 }
